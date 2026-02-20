@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Background -->
+    <color name="background">#000000</color>
+
+    <!-- Theme Colors -->
+    <color name="primary">#007AFF</color>
+    <color name="primary_dark">#000000</color>
+    <color name="accent">#00C6FF</color>
+
+    <!-- Switch Colors -->
+    <color name="switch_thumb_on">#FFFFFF</color>
+    <color name="switch_track_green">#4CD964</color>
+    <color name="switch_track_blue">#007AFF</color>
+    <color name="switch_track_purple">#AF52DE</color>
+
+    <!-- Text -->
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#8E8E93</color>
+    <color name="text_tertiary">#48484A</color>
+</resources>
