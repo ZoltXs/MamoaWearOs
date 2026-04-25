@@ -10,10 +10,17 @@ android {
         applicationId "com.mamoa.notifier"
         minSdk 26
         targetSdk 34
-        versionCode 4
-        versionName "2.3"
+        versionCode 5
+        versionName "3.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        
+        // Room schema export
+        javaCompileOptions {
+            annotationProcessorOptions {
+                arguments += ["room.schemaLocation": "$projectDir/schemas".toString()]
+            }
+        }
     }
 
     buildTypes {
@@ -46,6 +53,22 @@ dependencies {
     // Lifecycle
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
     implementation 'androidx.lifecycle:lifecycle-service:2.7.0'
+    
+    // WorkManager para watchdog y sync periodica
+    implementation 'androidx.work:work-runtime:2.9.0'
+    
+    // Room para persistencia de datos de salud
+    implementation 'androidx.room:room-runtime:2.6.1'
+    annotationProcessor 'androidx.room:room-compiler:2.6.1'
+    
+    // OkHttp para sync con servidor
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    
+    // Gson para serializar JSON
+    implementation 'com.google.code.gson:gson:2.10.1'
+    
+    // Samsung Health SDK (opcional, para datos de salud directos)
+    // implementation 'com.samsung.android:sdk-healthdata:1.5.0'
     
     // Testing
     testImplementation 'junit:junit:4.13.2'
