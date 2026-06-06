@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Campana de notificacion, centrada en la zona segura -->
+    <group
+        android:scaleX="1.55"
+        android:scaleY="1.55"
+        android:pivotX="54"
+        android:pivotY="54">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M54,40.5c-1.66,0 -3,-1.34 -3,-3c0,-1.66 1.34,-3 3,-3c1.66,0 3,1.34 3,3C57,39.16 55.66,40.5 54,40.5z" />
+        <!-- Cuerpo de la campana -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M66,62v-9c0,-5.53 -2.95,-10.16 -8,-11.42L58,40.5c0,-2.21 -1.79,-4 -4,-4s-4,1.79 -4,4l0,1.08C44.95,42.84 42,47.46 42,53v9l-3.5,3.5L38.5,67h31l0,-1.5L66,62z" />
+        <!-- Badbell -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M54,72c2.21,0 4,-1.79 4,-4h-8C50,70.21 51.79,72 54,72z" />
+    </group>
+</vector>

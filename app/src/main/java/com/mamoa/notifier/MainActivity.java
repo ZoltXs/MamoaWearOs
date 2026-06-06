@@ -326,8 +326,16 @@ public class MainActivity extends AppCompatActivity {
                 statusTitle.setText("Conectado");
                 statusSubtitle.setText(message != null ? message : "Enlace ANCS activo");
                 connectionProgress.setVisibility(View.GONE);
-            } else {
+            } else if (isIntermediateState(message)) {
+                // Estado de transicion: conectando / reconectando / negociando
                 connectionText.setText("Conectando...");
+                connectionSubtext.setText(message != null ? message : "Estableciendo enlace...");
+                connectionDot.setBackgroundResource(R.drawable.bg_status_dot_amber);
+                statusTitle.setText("Conectando...");
+                statusSubtitle.setText(message != null ? message : "Estableciendo enlace...");
+                connectionProgress.setVisibility(View.VISIBLE);
+            } else {
+                connectionText.setText("Desconectado");
                 connectionSubtext.setText(message != null ? message : "Buscando iPhone...");
                 connectionDot.setBackgroundResource(R.drawable.bg_status_dot_red);
                 statusTitle.setText("Buscando iPhone...");
@@ -335,6 +343,17 @@ public class MainActivity extends AppCompatActivity {
                 connectionProgress.setVisibility(View.VISIBLE);
             }
         });
+    }
+
+    /**
+     * Determina si el mensaje de estado corresponde a una fase de transicion
+     * (conectando/reconectando/negociando) para mostrar el indicador ambar.
+     */
+    private boolean isIntermediateState(String message) {
+        if (message == null) return false;
+        String m = message.toLowerCase();
+        return m.contains("conectando") || m.contains("reconect")
+                || m.contains("negociando") || m.contains("configurando");
     }
 
     private void updateConnectionStatus() {

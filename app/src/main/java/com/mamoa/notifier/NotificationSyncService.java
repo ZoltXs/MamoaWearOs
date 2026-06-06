@@ -14,10 +14,13 @@ import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
+import android.os.PowerManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.media.MediaMetadata;
@@ -85,6 +88,20 @@ public class NotificationSyncService extends Service {
     private boolean isConnected = false;
     private final AtomicInteger notificationCounter = new AtomicInteger(2000);
 
+    // --- Reconexion inteligente con backoff exponencial ---
+    private int reconnectAttempts = 0;
+    private static final long BASE_RECONNECT_DELAY = 3000;
+    private static final long MAX_RECONNECT_DELAY = 30000;
+    private boolean isReconnecting = false;
+    private boolean manualDisconnect = false;
+
+    // --- Watchdog: verifica periodicamente que el enlace siga vivo ---
+    private static final long WATCHDOG_INTERVAL = 20000;
+    private long lastActivityTimestamp = 0;
+
+    // --- Wake lock para mantener BLE activo en doze/standby ---
+    private PowerManager.WakeLock wakeLock;
+
     private final Queue<Runnable> bleOperationQueue = new LinkedList<>();
     private boolean bleOperationInProgress = false;
 
@@ -98,6 +115,9 @@ public class NotificationSyncService extends Service {
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 isConnected = true;
+                isReconnecting = false;
+                reconnectAttempts = 0;
+                lastActivityTimestamp = System.currentTimeMillis();
                 broadcastConnectionState(false, "Conectado. Negociando enlace...");
                 try {
                     handler.postDelayed(() -> {
@@ -110,11 +130,17 @@ public class NotificationSyncService extends Service {
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 isConnected = false;
-                broadcastConnectionState(false, "Desconectado. Reintentando...");
                 bleOperationInProgress = false;
                 bleOperationQueue.clear();
                 closeGatt();
-                handler.postDelayed(() -> connectToIPhone(), 5000);
+                if (manualDisconnect) {
+                    manualDisconnect = false;
+                    broadcastConnectionState(false, "Desconectado");
+                    return;
+                }
+                // status 133/8/19 = errores tipicos de enlace caido en iOS
+                Log.w(TAG, "Desconexion (status=" + status + "), programando reconexion");
+                scheduleReconnect();
             }
         }
 
@@ -130,6 +156,7 @@ public class NotificationSyncService extends Service {
         @Override
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
             if (status != BluetoothGatt.GATT_SUCCESS) return;
+            lastActivityTimestamp = System.currentTimeMillis();
             broadcastConnectionState(false, "Configurando servicios ANCS...");
             setupAncs(gatt);
             setupAms(gatt);
@@ -150,6 +177,7 @@ public class NotificationSyncService extends Service {
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
+            lastActivityTimestamp = System.currentTimeMillis();
             UUID uuid = characteristic.getUuid();
             byte[] data = characteristic.getValue();
             if (NOTIFICATION_SOURCE_UUID.equals(uuid)) handleNotificationSource(data);
@@ -169,6 +197,8 @@ public class NotificationSyncService extends Service {
         dataClient = Wearable.getDataClient(this);
         setupMediaSession();
         createNotificationChannels();
+        acquireWakeLock();
+        registerBluetoothStateReceiver();
         
         Notification serviceNotification = createServiceNotification("Servicio activo");
         if (Build.VERSION.SDK_INT >= 34) {
@@ -178,9 +208,132 @@ public class NotificationSyncService extends Service {
         }
         
         connectToIPhone();
+        startWatchdog();
         Wearable.getMessageClient(this).addListener(event -> {
             if ("/music_command".equals(event.getPath())) sendMusicCommand(event.getData()[0]);
         });
+    }
+
+    private void acquireWakeLock() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Mamoa::AncsWakeLock");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "No se pudo adquirir WakeLock", e);
+        }
+    }
+
+    // --- Receptor que reacciona a cambios del adaptador Bluetooth ---
+    private final BroadcastReceiver bluetoothStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(action)) {
+                int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR);
+                if (state == BluetoothAdapter.STATE_ON) {
+                    Log.d(TAG, "Bluetooth reactivado, reconectando");
+                    reconnectAttempts = 0;
+                    handler.postDelayed(() -> connectToIPhone(), 1500);
+                } else if (state == BluetoothAdapter.STATE_OFF) {
+                    isConnected = false;
+                    broadcastConnectionState(false, "Bluetooth desactivado");
+                }
+            } else if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action)) {
+                // El iPhone volvio al rango: intentar reenganchar de inmediato
+                BluetoothDevice d = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (d != null && !isConnected && isTargetDevice(d)) {
+                    Log.d(TAG, "iPhone detectado en rango, reconectando");
+                    reconnectAttempts = 0;
+                    handler.postDelayed(() -> connectToIPhone(), 800);
+                }
+            }
+        }
+    };
+
+    private void registerBluetoothStateReceiver() {
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
+        filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(bluetoothStateReceiver, filter);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error registrando receptor BT", e);
+        }
+    }
+
+    private boolean isTargetDevice(BluetoothDevice d) {
+        try {
+            String name = d.getName();
+            return name != null && name.toLowerCase().contains("iphone");
+        } catch (SecurityException e) {
+            return false;
+        }
+    }
+
+    // --- Watchdog: si no hay actividad ni conexion, fuerza reconexion ---
+    private final Runnable watchdogRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                boolean btReady = bluetoothAdapter != null && bluetoothAdapter.isEnabled();
+                if (btReady && !manualDisconnect) {
+                    if (!isConnected && !isReconnecting) {
+                        Log.d(TAG, "Watchdog: sin conexion, reintentando");
+                        scheduleReconnect();
+                    } else if (isConnected) {
+                        long idle = System.currentTimeMillis() - lastActivityTimestamp;
+                        // Si el enlace dice estar conectado pero lleva mucho sin actividad,
+                        // forzamos una reconexion limpia para recuperar ANCS.
+                        if (lastActivityTimestamp > 0 && idle > 90000) {
+                            Log.w(TAG, "Watchdog: enlace inactivo " + idle + "ms, reconectando");
+                            forceReconnect();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Watchdog error", e);
+            }
+            handler.postDelayed(this, WATCHDOG_INTERVAL);
+        }
+    };
+
+    private void startWatchdog() {
+        handler.removeCallbacks(watchdogRunnable);
+        handler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL);
+    }
+
+    // --- Reconexion con backoff exponencial ---
+    private void scheduleReconnect() {
+        if (isReconnecting || manualDisconnect) return;
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
+            broadcastConnectionState(false, "Bluetooth desactivado");
+            return;
+        }
+        isReconnecting = true;
+        long delay = Math.min(BASE_RECONNECT_DELAY * (1L << Math.min(reconnectAttempts, 4)), MAX_RECONNECT_DELAY);
+        reconnectAttempts++;
+        broadcastConnectionState(false, "Reconectando (intento " + reconnectAttempts + ")...");
+        handler.postDelayed(() -> {
+            isReconnecting = false;
+            connectToIPhone();
+        }, delay);
+    }
+
+    private void forceReconnect() {
+        manualDisconnect = false;
+        bleOperationInProgress = false;
+        bleOperationQueue.clear();
+        closeGatt();
+        reconnectAttempts = 0;
+        handler.postDelayed(this::connectToIPhone, 600);
     }
 
     private void setupMediaSession() {
@@ -219,7 +372,7 @@ public class NotificationSyncService extends Service {
     private Notification createServiceNotification(String text) {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Mamoa Notifier").setContentText(text)
-                .setSmallIcon(R.drawable.ic_launcher).setOngoing(true).build();
+                .setSmallIcon(R.drawable.ic_stat_notify).setOngoing(true).build();
     }
 
     private synchronized void enqueueBleOperation(Runnable operation) {
@@ -355,7 +508,7 @@ public class NotificationSyncService extends Service {
 
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, cid)
                 .setContentTitle(title != null ? title : bundleId).setContentText(message != null ? message : "")
-                .setSmallIcon(R.drawable.ic_launcher).setGroup(gkey).setAutoCancel(true)
+                .setSmallIcon(R.drawable.ic_stat_notify).setGroup(gkey).setAutoCancel(true)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT).setStyle(new NotificationCompat.BigTextStyle().bigText(message));
         
         Bitmap cached = iconCache.getIconSync(bundleId);
@@ -467,7 +620,11 @@ public class NotificationSyncService extends Service {
     }
 
     private void connectToIPhone() {
-        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) return;
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
+            broadcastConnectionState(false, "Bluetooth desactivado");
+            return;
+        }
+        manualDisconnect = false;
         try {
             for (BluetoothDevice d : bluetoothAdapter.getBondedDevices()) {
                 String deviceName = null;
@@ -477,12 +634,21 @@ public class NotificationSyncService extends Service {
                 
                 if (deviceName != null && deviceName.toLowerCase().contains("iphone")) {
                     closeGatt();
+                    broadcastConnectionState(false, "Conectando con " + deviceName + "...");
                     try {
-                        bluetoothGatt = d.connectGatt(this, true, gattCallback, BluetoothDevice.TRANSPORT_LE);
+                        // autoConnect=true permite que Android reenganche solo
+                        // cuando el iPhone vuelve al rango (clave para estabilidad).
+                        if (Build.VERSION.SDK_INT >= 23) {
+                            bluetoothGatt = d.connectGatt(this, true, gattCallback,
+                                    BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK);
+                        } else {
+                            bluetoothGatt = d.connectGatt(this, true, gattCallback, BluetoothDevice.TRANSPORT_LE);
+                        }
                     } catch (SecurityException ignored) {}
                     return;
                 }
             }
+            broadcastConnectionState(false, "iPhone no emparejado");
         } catch (Exception ignored) {}
     }
 
@@ -497,9 +663,15 @@ public class NotificationSyncService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_RECONNECT.equals(intent.getAction())) {
-            bleOperationInProgress = false; bleOperationQueue.clear(); closeGatt();
-            handler.postDelayed(this::connectToIPhone, 500);
+        if (intent != null) {
+            String action = intent.getAction();
+            if (ACTION_RECONNECT.equals(action)) {
+                reconnectAttempts = 0;
+                forceReconnect();
+            } else if (ACTION_MUSIC_COMMAND.equals(action)) {
+                byte cmd = intent.getByteExtra(EXTRA_MUSIC_COMMAND_ID, (byte) -1);
+                if (cmd >= 0) sendMusicCommand(cmd);
+            }
         }
         return START_STICKY;
     }
@@ -523,8 +695,14 @@ public class NotificationSyncService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        manualDisconnect = true;
+        handler.removeCallbacks(watchdogRunnable);
         if (mediaSession != null) { mediaSession.setActive(false); mediaSession.release(); }
         handler.removeCallbacksAndMessages(null); closeGatt();
+        try { unregisterReceiver(bluetoothStateReceiver); } catch (Exception ignored) {}
+        if (wakeLock != null && wakeLock.isHeld()) {
+            try { wakeLock.release(); } catch (Exception ignored) {}
+        }
         if (prefs != null) {
             prefs.edit()
                 .putBoolean("last_is_connected", false)
