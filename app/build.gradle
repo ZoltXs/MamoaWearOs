@@ -40,13 +40,6 @@ dependencies {
     // Wear OS
     implementation 'com.google.android.gms:play-services-wearable:18.1.0'
     
-    // Bluetooth
-    implementation 'androidx.bluetooth:bluetooth:1.0.0-alpha02'
-    
-    // Lifecycle
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
-    implementation 'androidx.lifecycle:lifecycle-service:2.7.0'
-    
     // Testing
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
